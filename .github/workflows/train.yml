@@ -1,0 +1,88 @@
+name: Train Super-Ensemble
+
+on:
+  workflow_dispatch:
+    inputs:
+      competitions:
+        description: "Space-separated Sportradar competition IDs"
+        required: true
+        default: "sr:competition:17"
+      min_year:
+        description: "Earliest season year"
+        required: true
+        default: "2019"
+      max_matches:
+        description: "Optional limit on number of matches (debug)"
+        required: false
+        default: ""
+
+  schedule:
+    # Retrain every Sunday at 03:00 UTC
+    - cron: "0 3 * * 0"
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    env:
+      SPORTRADAR_API_KEY: ${{ secrets.SPORTRADAR_API_KEY }}
+      SPORTRADAR_ACCESS_LEVEL: ${{ secrets.SPORTRADAR_ACCESS_LEVEL || 'trial' }}
+      SPORTRADAR_MAX_QPS: "1.0"
+      ARTIFACTS_DIR: ./artifacts
+      CACHE_DIR: ./data_cache
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install system dependencies (for torch CPU)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgomp1
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Cache Sportradar responses
+        uses: actions/cache@v4
+        with:
+          path: data_cache
+          key: sportradar-cache-${{ hashFiles('requirements.txt') }}-${{ github.run_id }}
+          restore-keys: |
+            sportradar-cache-
+
+      - name: Run training pipeline
+        run: |
+          COMPETITIONS="${{ github.event.inputs.competitions || 'sr:competition:17' }}"
+          MIN_YEAR="${{ github.event.inputs.min_year || '2019' }}"
+          MAX_MATCHES="${{ github.event.inputs.max_matches }}"
+
+          CMD="python main.py --competitions $COMPETITIONS --min-year $MIN_YEAR --log-level INFO"
+          if [ -n "$MAX_MATCHES" ]; then
+            CMD="$CMD --max-matches $MAX_MATCHES"
+          fi
+          echo "Executing: $CMD"
+          $CMD
+
+      - name: Upload trained models
+        uses: actions/upload-artifact@v4
+        with:
+          name: trained-models-${{ github.run_id }}
+          path: artifacts/models/
+          retention-days: 30
+
+      - name: Upload feature store
+        uses: actions/upload-artifact@v4
+        with:
+          name: feature-store-${{ github.run_id }}
+          path: artifacts/features/
+          retention-days: 14
