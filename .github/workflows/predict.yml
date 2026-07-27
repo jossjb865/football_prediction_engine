@@ -1,0 +1,67 @@
+name: Daily Prediction Batch
+
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Prediction date (YYYY-MM-DD). Leave empty for today."
+        required: false
+        default: ""
+      competitions:
+        description: "Space-separated competition IDs"
+        required: true
+        default: "sr:competition:17"
+
+  schedule:
+    # Run every day at 06:00 UTC (before most European leagues kick off)
+    - cron: "0 6 * * *"
+
+jobs:
+  predict:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      SPORTRADAR_API_KEY: ${{ secrets.SPORTRADAR_API_KEY }}
+      SPORTRADAR_ACCESS_LEVEL: ${{ secrets.SPORTRADAR_ACCESS_LEVEL || 'trial' }}
+      ARTIFACTS_DIR: ./artifacts
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Download latest trained models
+        uses: actions/download-artifact@v4
+        with:
+          name: trained-models
+          path: artifacts/models/
+        continue-on-error: true
+
+      # Fallback: if no artifact is present we still try to run with whatever
+      # models are committed or previously cached.
+      - name: Run inference
+        run: |
+          DATE_ARG=""
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            DATE_ARG="--date ${{ github.event.inputs.date }}"
+          fi
+          COMPETITIONS="${{ github.event.inputs.competitions || 'sr:competition:17' }}"
+          python predict.py $DATE_ARG --competitions $COMPETITIONS --log-level INFO
+
+      - name: Upload prediction CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: predictions-${{ github.run_id }}
+          path: predictions_*.csv
+          retention-days: 90
