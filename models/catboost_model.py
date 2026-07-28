@@ -1,18 +1,28 @@
+import logging
+from typing import List, Optional, Union
+
+import joblib
 import numpy as np
 import pandas as pd
 from catboost import CatBoostClassifier, Pool
-from typing import Optional, List, Union
-from .base_model import BaseModel
+
+from .base_model import BaseMatchModel
+
+logger = logging.getLogger(__name__)
 
 
-class CatBoostModel(BaseModel):
+class CatBoostMatchModel(BaseMatchModel):
+    """
+    Multiclass 1X2 CatBoost model with robust handling of categorical features.
+    Automatically converts float / NaN categorical columns to safe strings.
+    """
+
     def __init__(
         self,
         params: Optional[dict] = None,
         cat_features: Optional[List[Union[int, str]]] = None,
-        random_state: int = 42,
+        random_seed: int = 42,
     ):
-        super().__init__()
         self.params = params or {
             "iterations": 800,
             "learning_rate": 0.05,
@@ -20,107 +30,138 @@ class CatBoostModel(BaseModel):
             "l2_leaf_reg": 3.0,
             "loss_function": "MultiClass",
             "eval_metric": "TotalF1",
-            "random_seed": random_state,
+            "random_seed": random_seed,
             "verbose": False,
             "thread_count": -1,
             "early_stopping_rounds": 50,
+            "allow_writing_files": False,
         }
         self.cat_features = cat_features or []
-        self.model = CatBoostClassifier(**self.params)
-        self.feature_names_ = None
+        self.model: Optional[CatBoostClassifier] = None
+        self.feature_names_: List[str] = []
+        self.cat_col_names_: List[str] = []
 
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
     def _sanitize_cat_column(self, series: pd.Series) -> pd.Series:
-        """Limpia y convierte una columna categórica a string seguro para CatBoost."""
-        # Convertir flotantes enteros (ej. 242.0) a enteros primero para evitar '242.0' como string
+        """Convert a column to a clean string representation safe for CatBoost."""
         s = series.copy()
-        
-        # Rellenar valores nulos antes de pasar a string
         s = s.fillna("missing")
-        
-        # Convertir a string y formatear de forma limpia
+
         def clean_val(val):
             if val == "missing":
                 return "missing"
-            if isinstance(val, float) and val.is_integer():
+            if isinstance(val, (float, np.floating)) and val.is_integer():
                 return str(int(val))
             return str(val).strip()
 
         return s.apply(clean_val)
 
-    def _get_cat_col_names(self, df: pd.DataFrame) -> List[str]:
-        """Obtiene la lista de nombres de columnas categóricas."""
+    def _resolve_cat_columns(self, df: pd.DataFrame) -> List[str]:
+        """Resolve cat_features (indexes or names) to actual column names."""
         cat_cols = []
         for col in self.cat_features:
             if isinstance(col, int):
-                if col < len(df.columns):
+                if 0 <= col < len(df.columns):
                     cat_cols.append(df.columns[col])
             else:
                 if col in df.columns:
                     cat_cols.append(col)
-        return list(set(cat_cols))
+        return list(dict.fromkeys(cat_cols))  # preserve order, remove duplicates
 
+    def _prepare_dataframe(self, X: pd.DataFrame) -> pd.DataFrame:
+        """Return a copy with categorical columns sanitized."""
+        X_proc = X.copy()
+        for col in self.cat_col_names_:
+            if col in X_proc.columns:
+                X_proc[col] = self._sanitize_cat_column(X_proc[col])
+        return X_proc
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
     def fit(
         self,
-        X: Union[pd.DataFrame, np.ndarray],
-        y: np.ndarray,
+        X: pd.DataFrame,
+        y: pd.Series,
         sample_weight: Optional[np.ndarray] = None,
         eval_set=None,
-    ):
-        if isinstance(X, np.ndarray):
-            X = pd.DataFrame(X)
+    ) -> "CatBoostMatchModel":
+        if not isinstance(X, pd.DataFrame):
+            raise TypeError("X must be a pandas DataFrame")
 
         self.feature_names_ = list(X.columns)
-        X_processed = X.copy()
+        self.cat_col_names_ = self._resolve_cat_columns(X)
 
-        cat_cols = self._get_cat_col_names(X_processed)
-
-        # Aplicar saneamiento a columnas categóricas en Train
-        for col in cat_cols:
-            X_processed[col] = self._sanitize_cat_column(X_processed[col])
+        X_train = self._prepare_dataframe(X)
 
         train_pool = Pool(
-            data=X_processed,
+            data=X_train,
             label=y,
             weight=sample_weight,
-            cat_features=cat_cols if cat_cols else None,
+            cat_features=self.cat_col_names_ if self.cat_col_names_ else None,
         )
+
+        self.model = CatBoostClassifier(**self.params)
 
         if eval_set is not None:
             X_val, y_val = eval_set
-            if isinstance(X_val, np.ndarray):
+            if not isinstance(X_val, pd.DataFrame):
                 X_val = pd.DataFrame(X_val, columns=self.feature_names_)
-
-            X_val_processed = X_val.copy()
-            for col in cat_cols:
-                if col in X_val_processed.columns:
-                    X_val_processed[col] = self._sanitize_cat_column(X_val_processed[col])
-
+            X_val = self._prepare_dataframe(X_val)
             eval_pool = Pool(
-                data=X_val_processed, 
-                label=y_val, 
-                cat_features=cat_cols if cat_cols else None
+                data=X_val,
+                label=y_val,
+                cat_features=self.cat_col_names_ if self.cat_col_names_ else None,
             )
             self.model.fit(train_pool, eval_set=eval_pool, use_best_model=True)
         else:
             self.model.fit(train_pool)
 
+        logger.info(
+            "CatBoost trained on %d samples, %d features (%d categorical)",
+            len(X),
+            len(self.feature_names_),
+            len(self.cat_col_names_),
+        )
         return self
 
-    def predict_proba(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
-        if isinstance(X, np.ndarray):
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        if self.model is None:
+            raise RuntimeError("Model has not been fitted")
+
+        if not isinstance(X, pd.DataFrame):
             X = pd.DataFrame(X, columns=self.feature_names_)
 
-        X_processed = X.copy()
-        cat_cols = self._get_cat_col_names(X_processed)
+        # Ensure same columns order
+        X = X[self.feature_names_]
+        X_proc = self._prepare_dataframe(X)
 
-        for col in cat_cols:
-            if col in X_processed.columns:
-                X_processed[col] = self._sanitize_cat_column(X_processed[col])
+        return self.model.predict_proba(X_proc)
 
-        return self.model.predict_proba(X_processed)
+    def save(self, path: str) -> None:
+        if self.model is None:
+            raise RuntimeError("Nothing to save")
+        self.model.save_model(path)
+        meta = {
+            "feature_names": self.feature_names_,
+            "cat_col_names": self.cat_col_names_,
+            "params": self.params,
+        }
+        joblib.dump(meta, path + ".meta")
+
+    def load(self, path: str) -> "CatBoostMatchModel":
+        self.model = CatBoostClassifier()
+        self.model.load_model(path)
+        meta = joblib.load(path + ".meta")
+        self.feature_names_ = meta["feature_names"]
+        self.cat_col_names_ = meta["cat_col_names"]
+        self.params = meta["params"]
+        return self
 
     def get_feature_importance(self) -> pd.Series:
-        if self.feature_names_ is None:
+        if self.model is None or not self.feature_names_:
             return pd.Series(dtype=float)
         return pd.Series(
             self.model.get_feature_importance(),
