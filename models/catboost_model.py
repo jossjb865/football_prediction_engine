@@ -1,74 +1,117 @@
-import logging
-from typing import List, Optional
+### File: models/catboost_model.py
 
 import numpy as np
 import pandas as pd
 from catboost import CatBoostClassifier, Pool
-
-from .base_model import BaseMatchModel
-
-logger = logging.getLogger(__name__)
+from typing import Optional, List, Union
+from .base_model import BaseModel
 
 
-class CatBoostMatchModel(BaseMatchModel):
-    """CatBoost multiclass classifier optimised for categorical league / team identifiers."""
-
+class CatBoostModel(BaseModel):
     def __init__(
         self,
-        iterations: int = 800,
-        depth: int = 6,
-        learning_rate: float = 0.05,
-        l2_leaf_reg: float = 3.0,
-        random_seed: int = 42,
-        cat_features: Optional[List[str]] = None,
+        params: Optional[dict] = None,
+        cat_features: Optional[List[Union[int, str]]] = None,
+        random_state: int = 42,
     ):
-        self.iterations = iterations
-        self.depth = depth
-        self.learning_rate = learning_rate
-        self.l2_leaf_reg = l2_leaf_reg
-        self.random_seed = random_seed
+        super().__init__()
+        self.params = params or {
+            "iterations": 800,
+            "learning_rate": 0.05,
+            "depth": 6,
+            "l2_leaf_reg": 3.0,
+            "loss_function": "MultiClass",
+            "eval_metric": "TotalF1",
+            "random_seed": random_state,
+            "verbose": False,
+            "thread_count": -1,
+            "early_stopping_rounds": 50,
+        }
         self.cat_features = cat_features or []
-        self.model: Optional[CatBoostClassifier] = None
-        self.feature_names: list = []
+        self.model = CatBoostClassifier(**self.params)
+        self.feature_names_ = None
 
-    def fit(self, X: pd.DataFrame, y: pd.Series, sample_weight: Optional[np.ndarray] = None) -> "CatBoostMatchModel":
-        self.feature_names = list(X.columns)
-        # Detect categorical columns that exist in the frame
-        cat_idx = [i for i, c in enumerate(self.feature_names) if c in self.cat_features or c.endswith("_enc")]
-        train_pool = Pool(X, label=y, weight=sample_weight, cat_features=cat_idx)
+    def fit(
+        self,
+        X: Union[pd.DataFrame, np.ndarray],
+        y: np.ndarray,
+        sample_weight: Optional[np.ndarray] = None,
+        eval_set=None,
+    ):
+        if isinstance(X, np.ndarray):
+            X = pd.DataFrame(X)
 
-        self.model = CatBoostClassifier(
-            iterations=self.iterations,
-            depth=self.depth,
-            learning_rate=self.learning_rate,
-            l2_leaf_reg=self.l2_leaf_reg,
-            loss_function="MultiClass",
-            eval_metric="MultiClass",
-            random_seed=self.random_seed,
-            verbose=False,
-            thread_count=-1,
+        self.feature_names_ = list(X.columns)
+
+        # --- FIX CRÍTICO ---
+        # Convertir columnas categóricas a string (CatBoost no acepta float)
+        X_processed = X.copy()
+        cat_idx = []
+
+        if self.cat_features:
+            for col in self.cat_features:
+                if isinstance(col, int):
+                    col_name = X.columns[col]
+                else:
+                    col_name = col
+
+                if col_name in X_processed.columns:
+                    # Convertir a string y rellenar NaN
+                    X_processed[col_name] = (
+                        X_processed[col_name]
+                        .astype(str)
+                        .replace({"nan": "missing", "None": "missing", "NaN": "missing"})
+                    )
+                    cat_idx.append(col_name)
+
+        train_pool = Pool(
+            data=X_processed,
+            label=y,
+            weight=sample_weight,
+            cat_features=cat_idx if cat_idx else None,
         )
-        self.model.fit(train_pool)
-        logger.info("CatBoost trained on %d samples", len(X))
+
+        if eval_set is not None:
+            X_val, y_val = eval_set
+            if isinstance(X_val, np.ndarray):
+                X_val = pd.DataFrame(X_val, columns=self.feature_names_)
+
+            X_val_processed = X_val.copy()
+            for col in cat_idx:
+                if col in X_val_processed.columns:
+                    X_val_processed[col] = (
+                        X_val_processed[col]
+                        .astype(str)
+                        .replace({"nan": "missing", "None": "missing", "NaN": "missing"})
+                    )
+
+            eval_pool = Pool(X_val_processed, label=y_val, cat_features=cat_idx)
+            self.model.fit(train_pool, eval_set=eval_pool, use_best_model=True)
+        else:
+            self.model.fit(train_pool)
+
         return self
 
-    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        if self.model is None:
-            raise RuntimeError("Model not fitted")
-        return self.model.predict_proba(X[self.feature_names])
+    def predict_proba(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
+        if isinstance(X, np.ndarray):
+            X = pd.DataFrame(X, columns=self.feature_names_)
 
-    def save(self, path: str) -> None:
-        if self.model is None:
-            raise RuntimeError("Nothing to save")
-        self.model.save_model(path)
-        import joblib
-        joblib.dump({"feature_names": self.feature_names, "cat_features": self.cat_features}, path + ".meta")
+        X_processed = X.copy()
+        for col in (self.cat_features or []):
+            col_name = self.feature_names_[col] if isinstance(col, int) else col
+            if col_name in X_processed.columns:
+                X_processed[col_name] = (
+                    X_processed[col_name]
+                    .astype(str)
+                    .replace({"nan": "missing", "None": "missing", "NaN": "missing"})
+                )
 
-    def load(self, path: str) -> "CatBoostMatchModel":
-        self.model = CatBoostClassifier()
-        self.model.load_model(path)
-        import joblib
-        meta = joblib.load(path + ".meta")
-        self.feature_names = meta["feature_names"]
-        self.cat_features = meta["cat_features"]
-        return self
+        return self.model.predict_proba(X_processed)
+
+    def get_feature_importance(self) -> pd.Series:
+        if self.feature_names_ is None:
+            return pd.Series(dtype=float)
+        return pd.Series(
+            self.model.get_feature_importance(),
+            index=self.feature_names_,
+        ).sort_values(ascending=False)
