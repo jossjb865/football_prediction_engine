@@ -60,10 +60,6 @@ class DixonColesPoisson(BaseMatchModel):
         return -ll  # minimize negative log-likelihood
 
     def fit(self, X: pd.DataFrame, y: pd.Series, sample_weight: Optional[np.ndarray] = None) -> "DixonColesPoisson":
-        # X is expected to contain home_id, away_id, home_score, away_score, start_time
-        # For compatibility with the pipeline we reconstruct from the original matches
-        # In production the training pipeline passes a dedicated matches frame.
-        # Here we assume X already contains the necessary columns or we receive them via kwargs.
         raise NotImplementedError(
             "DixonColesPoisson expects a dedicated matches DataFrame. "
             "Use fit_from_matches() instead of the generic fit()."
@@ -76,7 +72,7 @@ class DixonColesPoisson(BaseMatchModel):
         self.team_index = {t: i for i, t in enumerate(self.teams)}
         n = len(self.teams)
 
-        # Initial parameters: attack=0, defence=0, home_adv=0.3, rho=-0.1
+        # Initial parameters: attack=0, defence=0, home_adv=0.25, rho=-0.05
         x0 = np.zeros(2 * n + 2)
         x0[2 * n] = 0.25
         x0[2 * n + 1] = -0.05
@@ -107,23 +103,25 @@ class DixonColesPoisson(BaseMatchModel):
         """X must contain home_id and away_id columns."""
         n = len(X)
         probs = np.zeros((n, 3))
-        for idx, row in X.iterrows():
+        
+        # Corrección aplicada aquí: usar enumerate para usar índice por posición 'i'
+        for i, (_, row) in enumerate(X.iterrows()):
             home = row["home_id"]
             away = row["away_id"]
             if home not in self.attack or away not in self.attack:
-                probs[idx] = [0.45, 0.27, 0.28]  # fallback prior
+                probs[i] = [0.45, 0.27, 0.28]  # fallback prior
                 continue
             lambda_h = np.exp(self.attack[home] + self.defence[away] + self.home_advantage)
             lambda_a = np.exp(self.attack[away] + self.defence[home])
             score_matrix = np.zeros((self.max_goals + 1, self.max_goals + 1))
-            for i in range(self.max_goals + 1):
-                for j in range(self.max_goals + 1):
-                    score_matrix[i, j] = self._dc_probability(i, j, lambda_h, lambda_a, self.rho)
+            for x_score in range(self.max_goals + 1):
+                for y_score in range(self.max_goals + 1):
+                    score_matrix[x_score, y_score] = self._dc_probability(x_score, y_score, lambda_h, lambda_a, self.rho)
             score_matrix /= score_matrix.sum()
             home_win = np.tril(score_matrix, -1).sum()
             draw = np.trace(score_matrix)
             away_win = np.triu(score_matrix, 1).sum()
-            probs[idx] = [home_win, draw, away_win]
+            probs[i] = [home_win, draw, away_win]
         return probs
 
     def save(self, path: str) -> None:
