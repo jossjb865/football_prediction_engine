@@ -1,5 +1,5 @@
 import logging
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
@@ -65,22 +65,28 @@ class LSTMMatchModel(BaseMatchModel):
         self.random_state = random_state
         self.model: Optional[_LSTMClassifier] = None
         self.sequence_builder = SequenceBuilder(seq_len=seq_len)
-        self.feature_cols: List[str] = []
         self.mean_: Optional[np.ndarray] = None
         self.std_: Optional[np.ndarray] = None
         self.input_dim: int = 0
 
-    def fit(self, X: pd.DataFrame, y: pd.Series, matches: Optional[pd.DataFrame] = None, sample_weight: Optional[np.ndarray] = None) -> "LSTMMatchModel":
+    def fit(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        matches: Optional[pd.DataFrame] = None,
+        sample_weight: Optional[np.ndarray] = None,
+    ) -> "LSTMMatchModel":
         if matches is None:
-            raise ValueError("LSTMMatchModel.fit requires the original matches DataFrame for sequence construction")
+            raise ValueError("LSTMMatchModel.fit requires the original matches DataFrame")
 
         torch.manual_seed(self.random_state)
-        self.feature_cols = list(X.columns)
-        self.sequence_builder.fit(matches, self.feature_cols)
 
+        # Build causal sequences from raw matches (feature_cols is ignored inside)
+        self.sequence_builder.fit(matches)
         X_seq = self.sequence_builder.transform(matches)
         self.input_dim = X_seq.shape[2]
 
+        # Standardize
         flat = X_seq.reshape(-1, self.input_dim)
         self.mean_ = flat.mean(axis=0)
         self.std_ = flat.std(axis=0) + 1e-8
@@ -90,7 +96,10 @@ class LSTMMatchModel(BaseMatchModel):
         dataset = TensorDataset(torch.from_numpy(X_seq), torch.from_numpy(y_np))
         loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
 
-        self.model = _LSTMClassifier(self.input_dim, self.hidden_dim, self.num_layers, self.dropout).to(self.device)
+        self.model = _LSTMClassifier(
+            self.input_dim, self.hidden_dim, self.num_layers, self.dropout
+        ).to(self.device)
+
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=1e-4)
         criterion = nn.CrossEntropyLoss()
 
@@ -106,7 +115,10 @@ class LSTMMatchModel(BaseMatchModel):
                 optimizer.step()
                 total_loss += loss.item() * len(xb)
             if (epoch + 1) % 10 == 0:
-                logger.info("LSTM epoch %d/%d – loss %.4f", epoch + 1, self.epochs, total_loss / len(dataset))
+                logger.info(
+                    "LSTM epoch %d/%d – loss %.4f",
+                    epoch + 1, self.epochs, total_loss / len(dataset),
+                )
         return self
 
     def predict_proba(self, X: pd.DataFrame, matches: Optional[pd.DataFrame] = None) -> np.ndarray:
@@ -117,6 +129,7 @@ class LSTMMatchModel(BaseMatchModel):
 
         X_seq = self.sequence_builder.transform(matches)
         X_seq = (X_seq - self.mean_) / self.std_
+
         self.model.eval()
         with torch.no_grad():
             logits = self.model(torch.from_numpy(X_seq).to(self.device))
@@ -133,7 +146,6 @@ class LSTMMatchModel(BaseMatchModel):
                 "hidden_dim": self.hidden_dim,
                 "num_layers": self.num_layers,
                 "dropout": self.dropout,
-                "feature_cols": self.feature_cols,
             },
             path,
         )
@@ -147,9 +159,10 @@ class LSTMMatchModel(BaseMatchModel):
         self.hidden_dim = ckpt["hidden_dim"]
         self.num_layers = ckpt["num_layers"]
         self.dropout = ckpt["dropout"]
-        self.feature_cols = ckpt["feature_cols"]
         self.sequence_builder = SequenceBuilder(seq_len=self.seq_len)
-        self.model = _LSTMClassifier(self.input_dim, self.hidden_dim, self.num_layers, self.dropout).to(self.device)
+        self.model = _LSTMClassifier(
+            self.input_dim, self.hidden_dim, self.num_layers, self.dropout
+        ).to(self.device)
         self.model.load_state_dict(ckpt["state_dict"])
         self.model.eval()
         return self
