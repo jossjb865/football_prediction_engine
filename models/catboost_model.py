@@ -1,5 +1,3 @@
-### File: models/catboost_model.py
-
 import numpy as np
 import pandas as pd
 from catboost import CatBoostClassifier, Pool
@@ -31,6 +29,36 @@ class CatBoostModel(BaseModel):
         self.model = CatBoostClassifier(**self.params)
         self.feature_names_ = None
 
+    def _sanitize_cat_column(self, series: pd.Series) -> pd.Series:
+        """Limpia y convierte una columna categórica a string seguro para CatBoost."""
+        # Convertir flotantes enteros (ej. 242.0) a enteros primero para evitar '242.0' como string
+        s = series.copy()
+        
+        # Rellenar valores nulos antes de pasar a string
+        s = s.fillna("missing")
+        
+        # Convertir a string y formatear de forma limpia
+        def clean_val(val):
+            if val == "missing":
+                return "missing"
+            if isinstance(val, float) and val.is_integer():
+                return str(int(val))
+            return str(val).strip()
+
+        return s.apply(clean_val)
+
+    def _get_cat_col_names(self, df: pd.DataFrame) -> List[str]:
+        """Obtiene la lista de nombres de columnas categóricas."""
+        cat_cols = []
+        for col in self.cat_features:
+            if isinstance(col, int):
+                if col < len(df.columns):
+                    cat_cols.append(df.columns[col])
+            else:
+                if col in df.columns:
+                    cat_cols.append(col)
+        return list(set(cat_cols))
+
     def fit(
         self,
         X: Union[pd.DataFrame, np.ndarray],
@@ -42,33 +70,19 @@ class CatBoostModel(BaseModel):
             X = pd.DataFrame(X)
 
         self.feature_names_ = list(X.columns)
-
-        # --- FIX CRÍTICO ---
-        # Convertir columnas categóricas a string (CatBoost no acepta float)
         X_processed = X.copy()
-        cat_idx = []
 
-        if self.cat_features:
-            for col in self.cat_features:
-                if isinstance(col, int):
-                    col_name = X.columns[col]
-                else:
-                    col_name = col
+        cat_cols = self._get_cat_col_names(X_processed)
 
-                if col_name in X_processed.columns:
-                    # Convertir a string y rellenar NaN
-                    X_processed[col_name] = (
-                        X_processed[col_name]
-                        .astype(str)
-                        .replace({"nan": "missing", "None": "missing", "NaN": "missing"})
-                    )
-                    cat_idx.append(col_name)
+        # Aplicar saneamiento a columnas categóricas en Train
+        for col in cat_cols:
+            X_processed[col] = self._sanitize_cat_column(X_processed[col])
 
         train_pool = Pool(
             data=X_processed,
             label=y,
             weight=sample_weight,
-            cat_features=cat_idx if cat_idx else None,
+            cat_features=cat_cols if cat_cols else None,
         )
 
         if eval_set is not None:
@@ -77,15 +91,15 @@ class CatBoostModel(BaseModel):
                 X_val = pd.DataFrame(X_val, columns=self.feature_names_)
 
             X_val_processed = X_val.copy()
-            for col in cat_idx:
+            for col in cat_cols:
                 if col in X_val_processed.columns:
-                    X_val_processed[col] = (
-                        X_val_processed[col]
-                        .astype(str)
-                        .replace({"nan": "missing", "None": "missing", "NaN": "missing"})
-                    )
+                    X_val_processed[col] = self._sanitize_cat_column(X_val_processed[col])
 
-            eval_pool = Pool(X_val_processed, label=y_val, cat_features=cat_idx)
+            eval_pool = Pool(
+                data=X_val_processed, 
+                label=y_val, 
+                cat_features=cat_cols if cat_cols else None
+            )
             self.model.fit(train_pool, eval_set=eval_pool, use_best_model=True)
         else:
             self.model.fit(train_pool)
@@ -97,14 +111,11 @@ class CatBoostModel(BaseModel):
             X = pd.DataFrame(X, columns=self.feature_names_)
 
         X_processed = X.copy()
-        for col in (self.cat_features or []):
-            col_name = self.feature_names_[col] if isinstance(col, int) else col
-            if col_name in X_processed.columns:
-                X_processed[col_name] = (
-                    X_processed[col_name]
-                    .astype(str)
-                    .replace({"nan": "missing", "None": "missing", "NaN": "missing"})
-                )
+        cat_cols = self._get_cat_col_names(X_processed)
+
+        for col in cat_cols:
+            if col in X_processed.columns:
+                X_processed[col] = self._sanitize_cat_column(X_processed[col])
 
         return self.model.predict_proba(X_processed)
 
