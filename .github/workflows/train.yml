@@ -76,13 +76,15 @@ jobs:
       - name: Upload trained models
         uses: actions/upload-artifact@v4
         with:
-          name: trained-models-${{ github.run_id }}
+          name: trained-models          # ← Nombre fijo (importante)
           path: artifacts/models/
           retention-days: 30
+          overwrite: true               # Sobrescribe el anterior
 
       - name: Upload feature store
         uses: actions/upload-artifact@v4
         with:
-          name: feature-store-${{ github.run_id }}
+          name: feature-store
           path: artifacts/features/
           retention-days: 14
+          overwrite: true
