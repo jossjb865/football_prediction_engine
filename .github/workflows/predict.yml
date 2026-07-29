@@ -13,7 +13,7 @@ on:
         default: "sr:competition:17"
 
   schedule:
-    # Run every day at 06:00 UTC (before most European leagues kick off)
+    # Run every day at 06:00 UTC
     - cron: "0 6 * * *"
 
 jobs:
@@ -48,8 +48,18 @@ jobs:
           path: artifacts/models/
         continue-on-error: true
 
-      # Fallback: if no artifact is present we still try to run with whatever
-      # models are committed or previously cached.
+      - name: Check downloaded models
+        id: check_models
+        run: |
+          if [ -d "artifacts/models" ] && [ "$(ls -A artifacts/models 2>/dev/null)" ]; then
+            echo "✅ Models found"
+            echo "has_models=true" >> $GITHUB_OUTPUT
+            ls -la artifacts/models/
+          else
+            echo "⚠️ No models found in artifact (will try with local/committed models)"
+            echo "has_models=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Run inference
         run: |
           DATE_ARG=""
@@ -57,6 +67,8 @@ jobs:
             DATE_ARG="--date ${{ github.event.inputs.date }}"
           fi
           COMPETITIONS="${{ github.event.inputs.competitions || 'sr:competition:17' }}"
+
+          echo "Running prediction with competitions: $COMPETITIONS"
           python predict.py $DATE_ARG --competitions $COMPETITIONS --log-level INFO
 
       - name: Upload prediction CSV
@@ -65,3 +77,4 @@ jobs:
           name: predictions-${{ github.run_id }}
           path: predictions_*.csv
           retention-days: 90
+          if-no-files-found: warn
