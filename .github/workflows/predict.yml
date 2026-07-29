@@ -41,6 +41,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Create artifacts directory
+        run: mkdir -p artifacts/models
+
+      # Intento principal de descarga del artifact
       - name: Download latest trained models
         uses: actions/download-artifact@v4
         with:
@@ -52,12 +56,37 @@ jobs:
         id: check_models
         run: |
           if [ -d "artifacts/models" ] && [ "$(ls -A artifacts/models 2>/dev/null)" ]; then
-            echo "✅ Models found"
+            echo "✅ Models found in artifact"
             echo "has_models=true" >> $GITHUB_OUTPUT
             ls -la artifacts/models/
           else
-            echo "⚠️ No models found in artifact (will try with local/committed models)"
+            echo "⚠️ No models found in artifact"
             echo "has_models=false" >> $GITHUB_OUTPUT
+          fi
+
+      # Fallback: intentar descargar el último artifact del workflow de train usando gh
+      - name: Fallback - Download latest artifact via gh
+        if: steps.check_models.outputs.has_models != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Trying to find the latest trained-models artifact from Train Super-Ensemble..."
+          
+          # Buscar el último run exitoso del workflow de train
+          RUN_ID=$(gh run list --workflow="Train Super-Ensemble" --status=success --limit 1 --json databaseId --jq '.[0].databaseId' || echo "")
+          
+          if [ -n "$RUN_ID" ]; then
+            echo "Found successful train run: $RUN_ID"
+            gh run download $RUN_ID --name trained-models --dir artifacts/models/ || true
+          else
+            echo "No previous successful train run found"
+          fi
+
+          if [ -d "artifacts/models" ] && [ "$(ls -A artifacts/models 2>/dev/null)" ]; then
+            echo "✅ Models recovered via gh"
+            ls -la artifacts/models/
+          else
+            echo "⚠️ Still no models. Will try with any committed models in the repo."
           fi
 
       - name: Run inference
