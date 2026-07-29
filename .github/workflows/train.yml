@@ -60,6 +60,12 @@ jobs:
           restore-keys: |
             sportradar-cache-
 
+      - name: Create artifacts directories
+        run: |
+          mkdir -p artifacts/models
+          mkdir -p artifacts/features
+          mkdir -p data_cache
+
       - name: Run training pipeline
         run: |
           COMPETITIONS="${{ github.event.inputs.competitions || 'sr:competition:17' }}"
@@ -73,13 +79,21 @@ jobs:
           echo "Executing: $CMD"
           $CMD
 
+      - name: List generated models
+        run: |
+          echo "=== Models generated ==="
+          ls -la artifacts/models/ || true
+          echo "=== Features generated ==="
+          ls -la artifacts/features/ || true
+
       - name: Upload trained models
         uses: actions/upload-artifact@v4
         with:
-          name: trained-models          # ← Nombre fijo (importante)
+          name: trained-models
           path: artifacts/models/
           retention-days: 30
-          overwrite: true               # Sobrescribe el anterior
+          overwrite: true
+          if-no-files-found: error
 
       - name: Upload feature store
         uses: actions/upload-artifact@v4
@@ -88,3 +102,4 @@ jobs:
           path: artifacts/features/
           retention-days: 14
           overwrite: true
+          if-no-files-found: warn
