@@ -1,4 +1,4 @@
-name: Autocorrección Estricta de Código con NVIDIA
+name: Autocorrección de Código con NVIDIA (Archivo por Archivo)
 
 on:
   push:
@@ -22,22 +22,20 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Instalar dependencias
+      - name: Instalar librería OpenAI
         run: |
           python -m pip install --upgrade pip
-          pip install openai pydantic
+          pip install openai
 
-      - name: Analizar y Aplicar Correcciones Automáticas
+      - name: Analizar y Corregir Archivos Individualmente
         env:
-          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          NVIDIA_API_KEY: \${{ secrets.NVIDIA_API_KEY }}
         shell: python
         run: |
           import os
           import glob
-          import json
+          import re
           from openai import OpenAI
-          from pydantic import BaseModel, Field
-          from typing import List, Dict
 
           # 1. Validar la clave de API
           api_key = os.getenv("NVIDIA_API_KEY")
@@ -45,89 +43,84 @@ jobs:
               print("::error::Falta configurar NVIDIA_API_KEY en los Secretos de GitHub.")
               exit(1)
 
-          # 2. Recopilar archivos relevantes (limitando tamaño para evitar bloqueos HTML)
-          print("Escaneando archivos del motor de predicciones de fútbol...")
-          archivos_codigo = {}
-          for archivo in glob.glob("**/*.py", recursive=True):
-              if any(excluido in archivo for excluido in ["venv", ".venv", "env", "node_modules", ".git"]):
-                  continue
-              try:
-                  with open(archivo, "r", encoding="utf-8") as f:
-                      contenido = f.read()
-                      # Evitar enviar archivos vacíos o masivos que saturen la API
-                      if 10 < len(contenido) < 50000:
-                          archivos_codigo[archivo] = contenido
-              except Exception as e:
-                  print(f"No se pudo leer {archivo}: {e}")
-
-          if not archivos_codigo:
-              print("No se encontraron scripts de Python válidos para corregir.")
-              exit(0)
-
-          # 3. Definir el esquema JSON estricto mediante Pydantic
-          class CorreccionArchivo(BaseModel):
-              ruta_archivo: str = Field(description="La ruta exacta del archivo a corregir")
-              codigo_corregido: str = Field(description="El contenido completo del código de Python corregido y optimizado")
-
-          class EsquemaRefactorizacion(BaseModel):
-              archivos_modificados: List[CorreccionArchivo]
-
-          # 4. Configurar cliente e invocar la API con Formato de Respuesta Estricto
+          # 2. Inicializar cliente con un modelo de alta capacidad de codificación
           client = OpenAI(
               base_url="https://nvidia.com",
               api_key=api_key
           )
+          
+          # Buscamos todos los archivos .py válidos en tu proyecto predictivo
+          archivos = [f for f in glob.glob("**/*.py", recursive=True) if not any(excluido in f for excluido in ["venv", ".venv", "env", "node_modules", ".git"])]
 
-          prompt_usuario = (
-              "Analiza y optimiza los siguientes archivos de mi motor de predicción de fútbol en Python. "
-              "Corrige errores lógicos, problemas de consistencia de datos deportivos o bugs sintácticos.\n\n"
-              f"{json.dumps(archivos_codigo, ensure_ascii=False)}"
-          )
+          if not archivos:
+              print("No se encontraron scripts de Python para procesar.")
+              exit(0)
 
-          print("Conectando con la API de NVIDIA mediante formato estructurado...")
-          try:
-              # Usamos Llama-3.1-70b que tiene un soporte óptimo para JSON estructurado nativo
-              completion = client.beta.chat.completions.parse(
-                  model="meta/llama-3.1-70b-instruct",
-                  messages=[
-                      {
-                          "role": "system", 
-                          "content": "Eres un refactorizador de código automatizado. Reescribe el código de los archivos entregados corrigiendo inconsistencias."
-                      },
-                      {"role": "user", "content": prompt_usuario}
-                  ],
-                  response_format=EsquemaRefactorizacion,
-                  temperature=0.1
-              )
+          cambios_totales = 0
 
-              # 5. Aplicar los cambios parseados directamente
-              respuesta_estructurada = completion.choices[0].message.parsed
-              cambios_realizados = 0
+          # 3. Iterar y refactorizar archivo por archivo para proteger los límites del servidor
+          for ruta in archivos:
+              print(f"\n[Procesando] Analizando inconsistencias en: {ruta}...")
+              try:
+                  with open(ruta, "r", encoding="utf-8") as f:
+                      codigo_actual = f.read()
 
-              for item in respuesta_estructurada.archivos_modificados:
-                  ruta = item.ruta_archivo
-                  nuevo_codigo = item.codigo_corregido
+                  # Omitir archivos prácticamente vacíos
+                  if len(codigo_actual.strip()) < 10:
+                      continue
 
-                  if os.path.exists(ruta):
-                      with open(ruta, "r", encoding="utf-8") as f:
-                          codigo_actual = f.read()
-                      
-                      if codigo_actual.strip() != nuevo_codigo.strip():
-                          with open(ruta, "w", encoding="utf-8") as f:
-                              f.write(nuevo_codigo)
-                          print(f"✓ Archivo corregido y actualizado: {ruta}")
-                          cambios_realizados += 1
+                  prompt_sistema = (
+                      "Eres un refactorizador de código automatizado especializado en Python y Machine Learning. "
+                      "Tu única tarea es recibir un script, corregir sus inconsistencias lógicas, bugs de sintaxis u optimizaciones de datos, "
+                      "y devolver el código completo corregido envuelto exclusivamente dentro de un bloque de código markdown de Python.\n\n"
+                      "Formato obligatorio de respuesta:\n"
+                      "```python\n"
+                      "# Tu código corregido aquí\n"
+                      "```\n"
+                      "No agregues explicaciones adicionales, introducciones ni saludos antes o después del bloque."
+                  )
+
+                  prompt_usuario = f"Optimiza y corrige el código del archivo deportivo localizado en la ruta '{ruta}':\n\n{codigo_actual}"
+
+                  completion = client.chat.completions.create(
+                      model="meta/llama-3.3-70b-instruct",
+                      messages=[
+                          {"role": "system", "content": prompt_sistema},
+                          {"role": "user", "content": prompt_usuario}
+                      ],
+                      temperature=0.1,
+                      max_tokens=4096
+                  )
+
+                  respuesta = completion.choices[0].message.content.strip()
+
+                  # 4. Extraer el bloque de código limpio usando expresiones regulares
+                  match = re.search(r"```python\s*(.*?)\s*```", respuesta, re.DOTALL)
+                  if match:
+                      nuevo_codigo = match.group(1).strip()
                   else:
-                      print(f"Ignorando sugerencia para ruta no existente: {ruta}")
+                      # Si no usó marcas markdown, evaluar si devolvió código directo
+                      if respuesta.startswith("import") or respuesta.startswith("from") or "def " in respuesta:
+                          nuevo_codigo = respuesta
+                      else:
+                          print(f"⚠ La API no devolvió un formato procesable para {ruta}. Se omite.")
+                          continue
 
-              if cambios_realizados == 0:
-                  print("No se requirieron cambios en el repositorio.")
+                  # 5. Sobreescribir si se hallaron mejoras significativas
+                  if codigo_actual.strip() != nuevo_codigo:
+                      with open(ruta, "w", encoding="utf-8") as f:
+                          f.write(nuevo_codigo + "\n")
+                      print(f"✓ ¡Correcciones aplicadas con éxito en {ruta}!")
+                      cambios_totales += 1
+                  else:
+                      print(f" No se requirieron cambios estructurales para {ruta}.")
 
-          except Exception as e:
-              print(f"::error::Error crítico procesando la API de NVIDIA: {e}")
-              exit(1)
+              except Exception as e:
+                  print(f"::warning::Error al procesar el archivo {ruta}: {e}. Continuando con el siguiente...")
 
-      # 6. Git Commit y Push seguro
+          print(f"\nProceso concluido. Archivos modificados en total: {cambios_totales}")
+
+      # 6. Guardar cambios de forma segura en tu repositorio
       - name: Confirmar y subir cambios corregidos por la IA
         run: |
           git config --global user.name "NVIDIA AI Auto-Fixer"
@@ -135,9 +128,9 @@ jobs:
           
           if [ -n "$(git status --porcelain)" ]; then
             git add .
-            git commit -m "style(nvidia-ai): corrección automática de inconsistencias lógicas"
+            git commit -m "style(nvidia-ai): corrección automatizada e independiente de archivos .py"
             git push origin HEAD:${{ github.ref }}
-            echo "Cambios subidos exitosamente al repositorio."
+            echo "Cambios reflejados y subidos exitosamente a GitHub."
           else
-            echo "No se detectaron diferencias estructurales en los archivos."
+            echo "El motor predictivo se encuentra completamente optimizado. No hay cambios pendientes."
           fi
