@@ -74,22 +74,25 @@ jobs:
             echo "has_models=false" >> $GITHUB_OUTPUT
           fi
 
+      # Ejecución de la inferencia pasando explícitamente la ruta de los modelos descargados
       - name: Run inference
         run: |
           DATE_ARG=""
           if [ -n "${{ github.event.inputs.date }}" ]; then
             DATE_ARG="--date ${{ github.event.inputs.date }}"
           fi
-          COMPETITIONS="${{ github.event.inputs.competitions || 'sr:competition:17' }}"
+          
+          # Extraemos las competiciones sin comillas agrupadas para que actúen como una lista limpia en nargs
+          COMPETITIONS=${{ github.event.inputs.competitions || 'sr:competition:17' }}
 
           echo "Running prediction with competitions: $COMPETITIONS"
-          python predict.py $DATE_ARG --competitions $COMPETITIONS --log-level INFO
+          python predict.py $DATE_ARG --competitions $COMPETITIONS --models-dir artifacts/models/ --log-level INFO
 
-      # Subida segura de resultados: Se cambia a 'warn' para rastrear fallos del script sin romper el flujo de trabajo
+      # Subida segura de resultados finales en CSV
       - name: Upload prediction CSV
         uses: actions/upload-artifact@v4
         with:
           name: predictions-${{ github.run_id }}
           path: predictions_*.csv
           retention-days: 90
-          if-no-files-found: warn
+          if-no-files-found: error # Cambiado a error para alertar si el CSV no se genera
