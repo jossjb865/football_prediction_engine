@@ -1,21 +1,21 @@
-name: Autocorrección de Código con NVIDIA Nemotron
+name: Autocorrección Estricta de Código con NVIDIA
 
 on:
   push:
     branches: [ "main", "master" ]
-  workflow_dispatch: # Te permite activarlo manualmente con un botón en GitHub
+  workflow_dispatch:
 
 jobs:
   nvidia-autofix:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # CRÍTICO: Permite que el flujo de trabajo guarde cambios en tu repositorio
+      contents: write
 
     steps:
       - name: Descargar el repositorio
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Descarga el historial completo para evitar conflictos de Git
+          fetch-depth: 0
 
       - name: Configurar Python
         uses: actions/setup-python@v5
@@ -59,13 +59,13 @@ jobs:
               print("No se encontraron scripts de Python para corregir.")
               exit(0)
 
-          # 3. Forzar al modelo a responder ÚNICAMENTE con un objeto JSON
+          # 3. Prompt estricto para asegurar la generación de JSON válido
           prompt_sistema = (
               "Eres un sistema automatizado de refactorización de software. Tu única función es corregir "
               "inconsistencias lógicas, bugs sintácticos y optimizaciones de Machine Learning (Data Leakage, Pandas, Scikit-Learn) "
               "en los archivos proporcionados.\n\n"
-              "DEBES RESPONDER EXCLUSIVAMENTE EN FORMATO JSON. No incluyas texto de saludo, ni bloques de marcado ```json, ni explicaciones.\n"
-              "El formato esperado del JSON es estrictamente un diccionario donde las llaves son las rutas de los archivos y los valores son el CÓDIGO COMPLETO CORREGIDO:\n"
+              "DEBES RESPONDER EXCLUSIVAMENTE EN FORMATO JSON. No incluyas texto de saludo, ni marcas de bloques de código como ```json, ni explicaciones.\n"
+              "El formato esperado del JSON debe ser estrictamente un diccionario donde las llaves son las rutas de los archivos y los valores son el CÓDIGO COMPLETO CORREGIDO:\n"
               "{\n"
               '  "ruta/del/archivo1.py": "codigo completo corregido aqui...",\n'
               '  "ruta/del/archivo2.py": "codigo completo corregido aqui..."\n'
@@ -80,29 +80,29 @@ jobs:
               api_key=api_key
           )
 
-          print("Conectando con NVIDIA Nemotron para generar soluciones estructuradas...")
+          print("Conectando con la API de NVIDIA para generar soluciones estructuradas...")
           try:
-              # Desactivamos stream=True ya que necesitamos parsear el objeto JSON completo al final de la respuesta
+              # Usamos un modelo altamente optimizado para seguimiento de instrucciones y formateo estructurado JSON
               completion = client.chat.completions.create(
-                  model="nvidia/nemotron-3-ultra-550b-a55b",
+                  model="meta/llama-3.3-70b-instruct",
                   messages=[
                       {"role": "system", "content": prompt_sistema},
                       {"role": "user", "content": prompt_usuario}
                   ],
-                  temperature=0.1, # Muy baja para evitar creatividad y asegurar consistencia sintáctica
-                  max_tokens=16384,
-                  extra_body={
-                      "chat_template_kwargs": {"enable_thinking": False} # Desactivado para que no ensucie la salida pura JSON
-                  }
+                  temperature=0.1,
+                  max_tokens=16384
               )
 
               respuesta_raw = completion.choices[0].message.content.strip()
               
-              # Limpieza de seguridad por si el modelo incluye bloques de markdown involuntarios
+              # Limpieza preventiva si el modelo encapsula la respuesta en bloques de código markdown
               if respuesta_raw.startswith("```"):
-                  respuesta_raw = respuesta_raw.split("\n", 1)[1].rsplit("\n", 1)[0].strip()
-                  if respuesta_raw.startswith("json"):
-                      respuesta_raw = respuesta_raw.split("\n", 1)[1].strip()
+                  lineas = respuesta_raw.splitlines()
+                  if lineas[0].startswith("```"):
+                      lineas = lineas[1:]
+                  if lineas[-1].startswith("```"):
+                      lineas = lineas[:-1]
+                  respuesta_raw = "\n".join(lineas).strip()
 
               # 4. Parsear JSON y sobreescribir los archivos modificados
               correcciones = json.loads(respuesta_raw)
@@ -110,7 +110,6 @@ jobs:
               cambios_realizados = 0
               for ruta, nuevo_codigo in correcciones.items():
                   if os.path.exists(ruta):
-                      # Comparar si realmente hubo cambios antes de sobreescribir
                       with open(ruta, "r", encoding="utf-8") as f:
                           codigo_actual = f.read()
                       
@@ -123,23 +122,25 @@ jobs:
                       print(f"Advertencia: El modelo sugirió cambios para una ruta inexistente: {ruta}")
 
               if cambios_realizados == 0:
-                  print("NVIDIA Nemotron determinó que tu código no presenta inconsistencias operativas. No se requirieron cambios.")
+                  print("NVIDIA determinó que tu código no presenta inconsistencias. No se requirieron cambios.")
                   
           except json.JSONDecodeError:
-              print("::error::La IA no devolvió un JSON válido. Revisa los logs de la respuesta raw:")
+              print("::error::La IA no devolvió un JSON válido. Revisa los logs de la respuesta cruda:")
               print(respuesta_raw)
               exit(1)
           except Exception as e:
-              print(f"::error::Error en el proceso de optimización: {e}")
+              # Manejo detallado si la API responde con un objeto de error o HTML
+              print(f"::error::Error detectado durante la consulta o procesamiento de la API de NVIDIA: {e}")
+              if 'completion' in locals() and hasattr(completion, 'text'):
+                  print(f"Contenido crudo del error: {completion.text}")
               exit(1)
 
-      # 5. Git Commit y Push: Si se reescribieron archivos, este paso sube los cambios de inmediato
+      # 5. Git Commit y Push
       - name: Confirmar y subir cambios corregidos por la IA
         run: |
           git config --global user.name "NVIDIA AI Auto-Fixer"
           git config --global user.email "actions@github.com"
           
-          # Verificar si hay cambios en el espacio de trabajo antes de hacer commit
           if [ -n "$(git status --porcelain)" ]; then
             git add .
             git commit -m "style(nvidia-ai): corrección automática de inconsistencias lógicas"
