@@ -22,10 +22,10 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Instalar librería OpenAI
+      - name: Instalar dependencias
         run: |
           python -m pip install --upgrade pip
-          pip install openai
+          pip install openai pydantic
 
       - name: Analizar y Aplicar Correcciones Automáticas
         env:
@@ -36,6 +36,8 @@ jobs:
           import glob
           import json
           from openai import OpenAI
+          from pydantic import BaseModel, Field
+          from typing import List, Dict
 
           # 1. Validar la clave de API
           api_key = os.getenv("NVIDIA_API_KEY")
@@ -43,7 +45,7 @@ jobs:
               print("::error::Falta configurar NVIDIA_API_KEY en los Secretos de GitHub.")
               exit(1)
 
-          # 2. Recopilar código de football_prediction_engine
+          # 2. Recopilar archivos relevantes (limitando tamaño para evitar bloqueos HTML)
           print("Escaneando archivos del motor de predicciones de fútbol...")
           archivos_codigo = {}
           for archivo in glob.glob("**/*.py", recursive=True):
@@ -51,64 +53,61 @@ jobs:
                   continue
               try:
                   with open(archivo, "r", encoding="utf-8") as f:
-                      archivos_codigo[archivo] = f.read()
+                      contenido = f.read()
+                      # Evitar enviar archivos vacíos o masivos que saturen la API
+                      if 10 < len(contenido) < 50000:
+                          archivos_codigo[archivo] = contenido
               except Exception as e:
                   print(f"No se pudo leer {archivo}: {e}")
 
           if not archivos_codigo:
-              print("No se encontraron scripts de Python para corregir.")
+              print("No se encontraron scripts de Python válidos para corregir.")
               exit(0)
 
-          # 3. Prompt estricto para asegurar la generación de JSON válido
-          prompt_sistema = (
-              "Eres un sistema automatizado de refactorización de software. Tu única función es corregir "
-              "inconsistencias lógicas, bugs sintácticos y optimizaciones de Machine Learning (Data Leakage, Pandas, Scikit-Learn) "
-              "en los archivos proporcionados.\n\n"
-              "DEBES RESPONDER EXCLUSIVAMENTE EN FORMATO JSON. No incluyas texto de saludo, ni marcas de bloques de código como ```json, ni explicaciones.\n"
-              "El formato esperado del JSON debe ser estrictamente un diccionario donde las llaves son las rutas de los archivos y los valores son el CÓDIGO COMPLETO CORREGIDO:\n"
-              "{\n"
-              '  "ruta/del/archivo1.py": "codigo completo corregido aqui...",\n'
-              '  "ruta/del/archivo2.py": "codigo completo corregido aqui..."\n'
-              "}"
-          )
+          # 3. Definir el esquema JSON estricto mediante Pydantic
+          class CorreccionArchivo(BaseModel):
+              ruta_archivo: str = Field(description="La ruta exacta del archivo a corregir")
+              codigo_corregido: str = Field(description="El contenido completo del código de Python corregido y optimizado")
 
-          contexto_archivos = json.dumps(archivos_codigo, ensure_ascii=False, indent=2)
-          prompt_usuario = f"Corrige las inconsistencias de los siguientes archivos del repositorio:\n\n{contexto_archivos}"
+          class EsquemaRefactorizacion(BaseModel):
+              archivos_modificados: List[CorreccionArchivo]
 
+          # 4. Configurar cliente e invocar la API con Formato de Respuesta Estricto
           client = OpenAI(
               base_url="https://nvidia.com",
               api_key=api_key
           )
 
-          print("Conectando con la API de NVIDIA para generar soluciones estructuradas...")
+          prompt_usuario = (
+              "Analiza y optimiza los siguientes archivos de mi motor de predicción de fútbol en Python. "
+              "Corrige errores lógicos, problemas de consistencia de datos deportivos o bugs sintácticos.\n\n"
+              f"{json.dumps(archivos_codigo, ensure_ascii=False)}"
+          )
+
+          print("Conectando con la API de NVIDIA mediante formato estructurado...")
           try:
-              # Usamos un modelo altamente optimizado para seguimiento de instrucciones y formateo estructurado JSON
-              completion = client.chat.completions.create(
-                  model="meta/llama-3.3-70b-instruct",
+              # Usamos Llama-3.1-70b que tiene un soporte óptimo para JSON estructurado nativo
+              completion = client.beta.chat.completions.parse(
+                  model="meta/llama-3.1-70b-instruct",
                   messages=[
-                      {"role": "system", "content": prompt_sistema},
+                      {
+                          "role": "system", 
+                          "content": "Eres un refactorizador de código automatizado. Reescribe el código de los archivos entregados corrigiendo inconsistencias."
+                      },
                       {"role": "user", "content": prompt_usuario}
                   ],
-                  temperature=0.1,
-                  max_tokens=16384
+                  response_format=EsquemaRefactorizacion,
+                  temperature=0.1
               )
 
-              respuesta_raw = completion.choices[0].message.content.strip()
-              
-              # Limpieza preventiva si el modelo encapsula la respuesta en bloques de código markdown
-              if respuesta_raw.startswith("```"):
-                  lineas = respuesta_raw.splitlines()
-                  if lineas[0].startswith("```"):
-                      lineas = lineas[1:]
-                  if lineas[-1].startswith("```"):
-                      lineas = lineas[:-1]
-                  respuesta_raw = "\n".join(lineas).strip()
-
-              # 4. Parsear JSON y sobreescribir los archivos modificados
-              correcciones = json.loads(respuesta_raw)
-              
+              # 5. Aplicar los cambios parseados directamente
+              respuesta_estructurada = completion.choices[0].message.parsed
               cambios_realizados = 0
-              for ruta, nuevo_codigo in correcciones.items():
+
+              for item in respuesta_estructurada.archivos_modificados:
+                  ruta = item.ruta_archivo
+                  nuevo_codigo = item.codigo_corregido
+
                   if os.path.exists(ruta):
                       with open(ruta, "r", encoding="utf-8") as f:
                           codigo_actual = f.read()
@@ -116,26 +115,19 @@ jobs:
                       if codigo_actual.strip() != nuevo_codigo.strip():
                           with open(ruta, "w", encoding="utf-8") as f:
                               f.write(nuevo_codigo)
-                          print(f"✓ Archivo corregido y actualizado con éxito: {ruta}")
+                          print(f"✓ Archivo corregido y actualizado: {ruta}")
                           cambios_realizados += 1
                   else:
-                      print(f"Advertencia: El modelo sugirió cambios para una ruta inexistente: {ruta}")
+                      print(f"Ignorando sugerencia para ruta no existente: {ruta}")
 
               if cambios_realizados == 0:
-                  print("NVIDIA determinó que tu código no presenta inconsistencias. No se requirieron cambios.")
-                  
-          except json.JSONDecodeError:
-              print("::error::La IA no devolvió un JSON válido. Revisa los logs de la respuesta cruda:")
-              print(respuesta_raw)
-              exit(1)
+                  print("No se requirieron cambios en el repositorio.")
+
           except Exception as e:
-              # Manejo detallado si la API responde con un objeto de error o HTML
-              print(f"::error::Error detectado durante la consulta o procesamiento de la API de NVIDIA: {e}")
-              if 'completion' in locals() and hasattr(completion, 'text'):
-                  print(f"Contenido crudo del error: {completion.text}")
+              print(f"::error::Error crítico procesando la API de NVIDIA: {e}")
               exit(1)
 
-      # 5. Git Commit y Push
+      # 6. Git Commit y Push seguro
       - name: Confirmar y subir cambios corregidos por la IA
         run: |
           git config --global user.name "NVIDIA AI Auto-Fixer"
