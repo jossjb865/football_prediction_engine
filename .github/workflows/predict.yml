@@ -13,7 +13,7 @@ on:
         default: "sr:competition:17"
 
   schedule:
-    # Run every day at 06:00 UTC
+    # Ejecución diaria a las 06:00 UTC
     - cron: "0 6 * * *"
 
 jobs:
@@ -44,49 +44,34 @@ jobs:
       - name: Create artifacts directory
         run: mkdir -p artifacts/models
 
-      # Intento principal de descarga del artifact
-      - name: Download latest trained models
-        uses: actions/download-artifact@v4
-        with:
-          name: trained-models
-          path: artifacts/models/
-        continue-on-error: true
-
-      - name: Check downloaded models
-        id: check_models
-        run: |
-          if [ -d "artifacts/models" ] && [ "$(ls -A artifacts/models 2>/dev/null)" ]; then
-            echo "✅ Models found in artifact"
-            echo "has_models=true" >> $GITHUB_OUTPUT
-            ls -la artifacts/models/
-          else
-            echo "⚠️ No models found in artifact"
-            echo "has_models=false" >> $GITHUB_OUTPUT
-          fi
-
-      # Fallback: intentar descargar el último artifact del workflow de train usando gh
-      - name: Fallback - Download latest artifact via gh
-        if: steps.check_models.outputs.has_models != 'true'
+      # Descarga cruzada nativa buscando el artefacto del flujo de entrenamiento usando la CLI de GitHub integrada
+      - name: Download latest trained models via gh CLI
+        id: download_models
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Trying to find the latest trained-models artifact from Train Super-Ensemble..."
-          
-          # Buscar el último run exitoso del workflow de train
+          echo "Buscando la última ejecución exitosa del flujo 'Train Super-Ensemble'..."
           RUN_ID=$(gh run list --workflow="Train Super-Ensemble" --status=success --limit 1 --json databaseId --jq '.[0].databaseId' || echo "")
           
           if [ -n "$RUN_ID" ]; then
-            echo "Found successful train run: $RUN_ID"
-            gh run download $RUN_ID --name trained-models --dir artifacts/models/ || true
+            echo "✅ Ejecución de entrenamiento encontrada: $RUN_ID"
+            echo "Descargando artefacto 'trained-models'..."
+            gh run download $RUN_ID --name trained-models --dir artifacts/models/ || echo "⚠️ Falló la descarga por gh CLI"
           else
-            echo "No previous successful train run found"
+            echo "❌ No se encontró ninguna ejecución previa exitosa del flujo de entrenamiento."
           fi
 
+      # Verificación del estado de los archivos del modelo antes de ejecutar la predicción
+      - name: Verify models structure
+        id: check_models
+        run: |
           if [ -d "artifacts/models" ] && [ "$(ls -A artifacts/models 2>/dev/null)" ]; then
-            echo "✅ Models recovered via gh"
+            echo "✅ Modelos listos para la inferencia estadística."
+            echo "has_models=true" >> $GITHUB_OUTPUT
             ls -la artifacts/models/
           else
-            echo "⚠️ Still no models. Will try with any committed models in the repo."
+            echo "❌ CRÍTICO: No hay modelos cargados. El script predict.py podría fallar."
+            echo "has_models=false" >> $GITHUB_OUTPUT
           fi
 
       - name: Run inference
@@ -100,6 +85,7 @@ jobs:
           echo "Running prediction with competitions: $COMPETITIONS"
           python predict.py $DATE_ARG --competitions $COMPETITIONS --log-level INFO
 
+      # Subida segura de resultados: Se cambia a 'warn' para rastrear fallos del script sin romper el flujo de trabajo
       - name: Upload prediction CSV
         uses: actions/upload-artifact@v4
         with:
