@@ -17,7 +17,7 @@ on:
         default: ""
 
   schedule:
-    # Retrain every Sunday at 03:00 UTC
+    # Retransmisión automática todos los domingos a las 03:00 UTC
     - cron: "0 3 * * 0"
 
 jobs:
