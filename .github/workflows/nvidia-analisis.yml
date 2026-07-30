@@ -1,21 +1,21 @@
-name: Análisis Avanzado con NVIDIA Nemotron 3 Ultra
+name: Autocorrección de Código con NVIDIA Nemotron
 
 on:
   push:
     branches: [ "main", "master" ]
-  pull_request:
-    branches: [ "main", "master" ]
-  workflow_dispatch:
+  workflow_dispatch: # Te permite activarlo manualmente con un botón en GitHub
 
 jobs:
-  nvidia-review:
+  nvidia-autofix:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write # CRÍTICO: Permite que el flujo de trabajo guarde cambios en tu repositorio
 
     steps:
       - name: Descargar el repositorio
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Descarga el historial completo para evitar conflictos de Git
 
       - name: Configurar Python
         uses: actions/setup-python@v5
@@ -27,13 +27,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install openai
 
-      - name: Ejecutar análisis de consistencia con OpenAI Client
+      - name: Analizar y Aplicar Correcciones Automáticas
         env:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
         shell: python
         run: |
           import os
           import glob
+          import json
           from openai import OpenAI
 
           # 1. Validar la clave de API
@@ -42,10 +43,9 @@ jobs:
               print("::error::Falta configurar NVIDIA_API_KEY en los Secretos de GitHub.")
               exit(1)
 
-          # 2. Recopilar todos tus archivos de predicción futbolística (.py)
-          print("Recopilando archivos Python del repositorio football_prediction_engine...")
+          # 2. Recopilar código de football_prediction_engine
+          print("Escaneando archivos del motor de predicciones de fútbol...")
           archivos_codigo = {}
-          
           for archivo in glob.glob("**/*.py", recursive=True):
               if any(excluido in archivo for excluido in ["venv", ".venv", "env", "node_modules", ".git"]):
                   continue
@@ -53,72 +53,98 @@ jobs:
                   with open(archivo, "r", encoding="utf-8") as f:
                       archivos_codigo[archivo] = f.read()
               except Exception as e:
-                  print(f"Advertencia: No se pudo leer {archivo}: {e}")
+                  print(f"No se pudo leer {archivo}: {e}")
 
           if not archivos_codigo:
-              print("::warning::No se encontraron scripts de Python para analizar.")
+              print("No se encontraron scripts de Python para corregir.")
               exit(0)
 
-          # 3. Estructurar el contexto de código para la IA
-          contexto_codigo = ""
-          for ruta, contenido in archivos_codigo.items():
-              contexto_codigo += f"\n--- ARCHIVO: {ruta} ---\n{contenido}\n"
-
-          prompt_usuario = (
-              "Analiza en detalle las inconsistencias de este motor de predicción de fútbol en Python. "
-              "Revisa problemas lógicos en el preprocesamiento de datos (Pandas/Numpy), fugas de datos "
-              "entre sets de entrenamiento y prueba (data leakage), y errores en las predicciones. "
-              f"Aquí está el código:\n\n{contexto_codigo}"
+          # 3. Forzar al modelo a responder ÚNICAMENTE con un objeto JSON
+          prompt_sistema = (
+              "Eres un sistema automatizado de refactorización de software. Tu única función es corregir "
+              "inconsistencias lógicas, bugs sintácticos y optimizaciones de Machine Learning (Data Leakage, Pandas, Scikit-Learn) "
+              "en los archivos proporcionados.\n\n"
+              "DEBES RESPONDER EXCLUSIVAMENTE EN FORMATO JSON. No incluyas texto de saludo, ni bloques de marcado ```json, ni explicaciones.\n"
+              "El formato esperado del JSON es estrictamente un diccionario donde las llaves son las rutas de los archivos y los valores son el CÓDIGO COMPLETO CORREGIDO:\n"
+              "{\n"
+              '  "ruta/del/archivo1.py": "codigo completo corregido aqui...",\n'
+              '  "ruta/del/archivo2.py": "codigo completo corregido aqui..."\n'
+              "}"
           )
 
-          # 4. Inicializar cliente con la URL Base de NVIDIA
+          contexto_archivos = json.dumps(archivos_codigo, ensure_ascii=False, indent=2)
+          prompt_usuario = f"Corrige las inconsistencias de los siguientes archivos del repositorio:\n\n{contexto_archivos}"
+
           client = OpenAI(
-              base_url="https://integrate.api.nvidia.com/v1",
+              base_url="https://nvidia.com",
               api_key=api_key
           )
 
-          # 5. Generar Completado por Streaming (capturando razonamiento interno y contenido)
-          print("Iniciando análisis avanzado y conectando con NVIDIA API...")
+          print("Conectando con NVIDIA Nemotron para generar soluciones estructuradas...")
           try:
+              # Desactivamos stream=True ya que necesitamos parsear el objeto JSON completo al final de la respuesta
               completion = client.chat.completions.create(
                   model="nvidia/nemotron-3-ultra-550b-a55b",
                   messages=[
-                      {
-                          "role": "system", 
-                          "content": "Eres un arquitecto de software experto en Machine Learning aplicado al deporte. Analiza el código buscando inconsistencias y bugs."
-                      },
+                      {"role": "system", "content": prompt_sistema},
                       {"role": "user", "content": prompt_usuario}
                   ],
-                  temperature=0.2, # Ajustado a un valor bajo para que el análisis técnico sea preciso y consistente
-                  top_p=0.95,
+                  temperature=0.1, # Muy baja para evitar creatividad y asegurar consistencia sintáctica
                   max_tokens=16384,
                   extra_body={
-                      "chat_template_kwargs": {"enable_thinking": True},
-                      "reasoning_budget": 16384
-                  },
-                  stream=True
+                      "chat_template_kwargs": {"enable_thinking": False} # Desactivado para que no ensucie la salida pura JSON
+                  }
               )
 
-              print("\n" + "="*60)
-              print(" [PROCESO DE RAZONAMIENTO E INFORME FINAL DE NVIDIA] ")
-              print("="*60 + "\n")
+              respuesta_raw = completion.choices[0].message.content.strip()
+              
+              # Limpieza de seguridad por si el modelo incluye bloques de markdown involuntarios
+              if respuesta_raw.startswith("```"):
+                  respuesta_raw = respuesta_raw.split("\n", 1)[1].rsplit("\n", 1)[0].strip()
+                  if respuesta_raw.startswith("json"):
+                      respuesta_raw = respuesta_raw.split("\n", 1)[1].strip()
 
-              # 6. Iterar el stream imprimiendo reasoning_content y content
-              for chunk in completion:
-                  if not chunk.choices:
-                      continue
+              # 4. Parsear JSON y sobreescribir los archivos modificados
+              correcciones = json.loads(respuesta_raw)
+              
+              cambios_realizados = 0
+              for ruta, nuevo_codigo in correcciones.items():
+                  if os.path.exists(ruta):
+                      # Comparar si realmente hubo cambios antes de sobreescribir
+                      with open(ruta, "r", encoding="utf-8") as f:
+                          codigo_actual = f.read()
+                      
+                      if codigo_actual.strip() != nuevo_codigo.strip():
+                          with open(ruta, "w", encoding="utf-8") as f:
+                              f.write(nuevo_codigo)
+                          print(f"✓ Archivo corregido y actualizado con éxito: {ruta}")
+                          cambios_realizados += 1
+                  else:
+                      print(f"Advertencia: El modelo sugirió cambios para una ruta inexistente: {ruta}")
+
+              if cambios_realizados == 0:
+                  print("NVIDIA Nemotron determinó que tu código no presenta inconsistencias operativas. No se requirieron cambios.")
                   
-                  # Captura la cadena de pensamiento profundo si el modelo la genera
-                  reasoning = getattr(chunk.choices[0].delta, "reasoning_content", None)
-                  if reasoning:
-                      print(reasoning, end="")
-                      
-                  # Captura el informe de errores e inconsistencias final
-                  if chunk.choices[0].delta.content is not None:
-                      print(chunk.choices[0].delta.content, end="")
-                      
-              print("\n\n" + "="*60)
-
-          except Exception as e:
-              print(f"\n::error::Error crítico durante el streaming de la API: {e}")
+          except json.JSONDecodeError:
+              print("::error::La IA no devolvió un JSON válido. Revisa los logs de la respuesta raw:")
+              print(respuesta_raw)
               exit(1)
+          except Exception as e:
+              print(f"::error::Error en el proceso de optimización: {e}")
+              exit(1)
+
+      # 5. Git Commit y Push: Si se reescribieron archivos, este paso sube los cambios de inmediato
+      - name: Confirmar y subir cambios corregidos por la IA
+        run: |
+          git config --global user.name "NVIDIA AI Auto-Fixer"
+          git config --global user.email "actions@github.com"
+          
+          # Verificar si hay cambios en el espacio de trabajo antes de hacer commit
+          if [ -n "$(git status --porcelain)" ]; then
+            git add .
+            git commit -m "style(nvidia-ai): corrección automática de inconsistencias lógicas"
+            git push origin HEAD:${{ github.ref }}
+            echo "Cambios subidos exitosamente al repositorio."
+          else
+            echo "No se detectaron diferencias estructurales en los archivos."
+          fi
